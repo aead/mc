@@ -178,6 +178,33 @@ func (c *s3Client) GetURL() clientURL {
 	return *c.targetURL
 }
 
+func getSTSCreds(endpoint string) (credsValue credentials.Value, idpURL string, err *probe.Error) {
+	sattr := readSAMLAttr()
+
+	// Login and obtain saml assertion.
+	samlAssertion, err := getSAMLAssertion(sattr)
+	if err != nil {
+		return credsValue, idpURL, err.Trace(endpoint)
+	}
+
+	// Initialize SAMLProvider credentials.
+	creds := credentials.New(&SAMLProvider{
+		endpoint:      endpoint,
+		samlAssertion: samlAssertion,
+	})
+
+	credsValue, e := creds.Get()
+	if e != nil {
+		return credentials.Value{}, "", probe.NewError(e)
+	}
+
+	return credsValue, sattr.idpURL, nil
+}
+
+func (c *s3Client) Login(endpoint string) (credsValue credentials.Value, idpURL string, err *probe.Error) {
+	return getSTSCreds(endpoint)
+}
+
 // Add bucket notification
 func (c *s3Client) AddNotificationConfig(arn string, events []string, prefix, suffix string) *probe.Error {
 	bucket, _ := c.url2BucketAndObject()
@@ -450,7 +477,6 @@ func (c *s3Client) Watch(params watchParams) (*watchObject, *probe.Error) {
 						Time:      record.EventTime,
 						Size:      record.S3.Object.Size,
 						Path:      u.String(),
-						Client:    c,
 						Type:      EventCreate,
 						Host:      record.Source.Host,
 						Port:      record.Source.Port,
@@ -461,7 +487,6 @@ func (c *s3Client) Watch(params watchParams) (*watchObject, *probe.Error) {
 					eventChan <- EventInfo{
 						Time:      record.EventTime,
 						Path:      u.String(),
-						Client:    c,
 						Type:      EventRemove,
 						Host:      record.Source.Host,
 						Port:      record.Source.Port,
@@ -472,7 +497,6 @@ func (c *s3Client) Watch(params watchParams) (*watchObject, *probe.Error) {
 						Time:      record.EventTime,
 						Size:      record.S3.Object.Size,
 						Path:      u.String(),
-						Client:    c,
 						Type:      EventAccessedRead,
 						Host:      record.Source.Host,
 						Port:      record.Source.Port,
@@ -483,7 +507,6 @@ func (c *s3Client) Watch(params watchParams) (*watchObject, *probe.Error) {
 						Time:      record.EventTime,
 						Size:      record.S3.Object.Size,
 						Path:      u.String(),
-						Client:    c,
 						Type:      EventAccessedStat,
 						Host:      record.Source.Host,
 						Port:      record.Source.Port,

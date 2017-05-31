@@ -30,6 +30,7 @@ import (
 
 	"github.com/minio/mc/pkg/hookreader"
 	"github.com/minio/mc/pkg/ioutils"
+	"github.com/minio/minio-go/pkg/credentials"
 	"github.com/minio/minio/pkg/probe"
 	"github.com/rjeczalik/notify"
 )
@@ -92,6 +93,13 @@ func isIgnoredFile(filename string) bool {
 // URL get url.
 func (f *fsClient) GetURL() clientURL {
 	return *f.PathURL
+}
+
+func (f *fsClient) Login(stsEndpoint string) (credentials.Value, string, *probe.Error) {
+	return credentials.Value{}, "", probe.NewError(APINotImplemented{
+		API:     "Login",
+		APIType: "filesystem",
+	})
 }
 
 // Watches for all fs events on an input path.
@@ -162,25 +170,22 @@ func (f *fsClient) Watch(params watchParams) (*watchObject, *probe.Error) {
 					continue
 				}
 				eventChan <- EventInfo{
-					Time:   UTCNow().Format(timeFormatFS),
-					Size:   i.Size(),
-					Path:   event.Path(),
-					Client: f,
-					Type:   EventCreate,
+					Time: UTCNow().Format(timeFormatFS),
+					Size: i.Size(),
+					Path: event.Path(),
+					Type: EventCreate,
 				}
 			} else if IsDeleteEvent(event.Event()) {
 				eventChan <- EventInfo{
-					Time:   UTCNow().Format(timeFormatFS),
-					Path:   event.Path(),
-					Client: f,
-					Type:   EventRemove,
+					Time: UTCNow().Format(timeFormatFS),
+					Path: event.Path(),
+					Type: EventRemove,
 				}
 			} else if IsGetEvent(event.Event()) {
 				eventChan <- EventInfo{
-					Time:   UTCNow().Format(timeFormatFS),
-					Path:   event.Path(),
-					Client: f,
-					Type:   EventAccessed,
+					Time: UTCNow().Format(timeFormatFS),
+					Path: event.Path(),
+					Type: EventAccessed,
 				}
 			}
 		}
