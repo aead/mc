@@ -47,6 +47,7 @@ type s3Client struct {
 	targetURL    *clientURL
 	api          *minio.Client
 	virtualStyle bool
+	stsCreds     bool
 }
 
 const (
@@ -93,6 +94,10 @@ func newFactory() func(config *Config) (Client, *probe.Error) {
 			if isGoogle(hostName) {
 				hostName = googleHostName
 			}
+		}
+
+		if config.IdpURL != "" {
+			s3Clnt.stsCreds = true
 		}
 
 		// Generate a hash out of s3Conf.
@@ -199,10 +204,6 @@ func getSTSCreds(endpoint string) (credsValue credentials.Value, idpURL string, 
 	}
 
 	return credsValue, sattr.idpURL, nil
-}
-
-func (c *s3Client) Login(endpoint string) (credsValue credentials.Value, idpURL string, err *probe.Error) {
-	return getSTSCreds(endpoint)
 }
 
 // Add bucket notification
@@ -526,6 +527,9 @@ func (c *s3Client) Get() (io.Reader, map[string][]string, *probe.Error) {
 	reader, e := c.api.GetObject(bucket, object)
 	if e != nil {
 		errResponse := minio.ToErrorResponse(e)
+		if errResponse.Code == "InvalidAccessKeyId" && c.stsCreds {
+			return nil, nil, probe.NewError(InvalidAccessKeyID{msg: errResponse.Message})
+		}
 		if errResponse.Code == "NoSuchBucket" {
 			return nil, nil, probe.NewError(BucketDoesNotExist{
 				Bucket: bucket,
@@ -544,6 +548,9 @@ func (c *s3Client) Get() (io.Reader, map[string][]string, *probe.Error) {
 	objInfo, e := reader.Stat()
 	if e != nil {
 		errResponse := minio.ToErrorResponse(e)
+		if errResponse.Code == "InvalidAccessKeyId" && c.stsCreds {
+			return nil, nil, probe.NewError(InvalidAccessKeyID{msg: errResponse.Message})
+		}
 		if errResponse.Code == "AccessDenied" {
 			return nil, nil, probe.NewError(PathInsufficientPermission{Path: c.targetURL.String()})
 		}
@@ -568,6 +575,9 @@ func (c *s3Client) Copy(source string, size int64, progress io.Reader) *probe.Er
 	e := c.api.CopyObject(bucket, object, source, copyConds)
 	if e != nil {
 		errResponse := minio.ToErrorResponse(e)
+		if errResponse.Code == "InvalidAccessKeyId" && c.stsCreds {
+			return probe.NewError(InvalidAccessKeyID{msg: errResponse.Message})
+		}
 		if errResponse.Code == "AccessDenied" {
 			return probe.NewError(PathInsufficientPermission{
 				Path: c.targetURL.String(),
@@ -611,6 +621,9 @@ func (c *s3Client) Put(reader io.Reader, size int64, metadata map[string][]strin
 	n, e := c.api.PutObjectWithMetadata(bucket, object, reader, metadata, progress)
 	if e != nil {
 		errResponse := minio.ToErrorResponse(e)
+		if errResponse.Code == "InvalidAccessKeyId" && c.stsCreds {
+			return n, probe.NewError(InvalidAccessKeyID{msg: errResponse.Message})
+		}
 		if errResponse.Code == "UnexpectedEOF" || e == io.EOF {
 			return n, probe.NewError(UnexpectedEOF{
 				TotalSize:    size,
@@ -742,13 +755,21 @@ func (c *s3Client) Remove(isIncomplete bool, contentCh <-chan *clientContent) <-
 
 		// Read statusCh and write to errorCh.
 		for removeStatus := range statusCh {
+			errResp := minio.ToErrorResponse(removeStatus.Err)
+			if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+				removeStatus.Err = InvalidAccessKeyID{msg: errResp.Message}
+			}
 			errorCh <- probe.NewError(removeStatus.Err)
 		}
 
 		// Remove bucket for regular objects.
 		if bucketContent != nil && !isIncomplete {
-			if err := c.api.RemoveBucket(bucket); err != nil {
-				errorCh <- probe.NewError(err)
+			if e := c.api.RemoveBucket(bucket); e != nil {
+				errResp := minio.ToErrorResponse(e)
+				if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+					e = InvalidAccessKeyID{msg: errResp.Message}
+				}
+				errorCh <- probe.NewError(e)
 			}
 		}
 	}()
@@ -786,6 +807,10 @@ func (c *s3Client) MakeBucket(region string, ignoreExisting bool) *probe.Error {
 	}
 	e := c.api.MakeBucket(bucket, region)
 	if e != nil {
+		errResp := minio.ToErrorResponse(e)
+		if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+			e = InvalidAccessKeyID{msg: errResp.Message}
+		}
 		// Ignore bucket already existing error when ignoreExisting flag is enabled
 		if ignoreExisting {
 			switch minio.ToErrorResponse(e).Code {
@@ -807,9 +832,13 @@ func (c *s3Client) GetAccessRules() (map[string]string, *probe.Error) {
 		return map[string]string{}, probe.NewError(BucketNameEmpty{})
 	}
 	policies := map[string]string{}
-	policyRules, err := c.api.ListBucketPolicies(bucket, object)
-	if err != nil {
-		return nil, probe.NewError(err)
+	policyRules, e := c.api.ListBucketPolicies(bucket, object)
+	if e != nil {
+		errResp := minio.ToErrorResponse(e)
+		if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+			e = InvalidAccessKeyID{msg: errResp.Message}
+		}
+		return nil, probe.NewError(e)
 	}
 	// Hide policy data structure at this level
 	for k, v := range policyRules {
@@ -826,6 +855,10 @@ func (c *s3Client) GetAccess() (string, *probe.Error) {
 	}
 	bucketPolicy, e := c.api.GetBucketPolicy(bucket, object)
 	if e != nil {
+		errResp := minio.ToErrorResponse(e)
+		if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+			e = InvalidAccessKeyID{msg: errResp.Message}
+		}
 		return "", probe.NewError(e)
 	}
 	return string(bucketPolicy), nil
@@ -839,6 +872,10 @@ func (c *s3Client) SetAccess(bucketPolicy string) *probe.Error {
 	}
 	e := c.api.SetBucketPolicy(bucket, object, policy.BucketPolicy(bucketPolicy))
 	if e != nil {
+		errResp := minio.ToErrorResponse(e)
+		if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+			e = InvalidAccessKeyID{msg: errResp.Message}
+		}
 		return probe.NewError(e)
 	}
 	return nil
@@ -865,6 +902,10 @@ func (c *s3Client) Stat(isIncomplete bool) (*clientContent, *probe.Error) {
 	if object == "" {
 		exists, e := c.api.BucketExists(bucket)
 		if e != nil {
+			errResp := minio.ToErrorResponse(e)
+			if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+				e = InvalidAccessKeyID{msg: errResp.Message}
+			}
 			return nil, probe.NewError(e)
 		}
 		if !exists {
@@ -888,6 +929,10 @@ func (c *s3Client) Stat(isIncomplete bool) (*clientContent, *probe.Error) {
 	if isIncomplete {
 		for objectMultipartInfo := range c.api.ListIncompleteUploads(bucket, object, nonRecursive, nil) {
 			if objectMultipartInfo.Err != nil {
+				errResp := minio.ToErrorResponse(objectMultipartInfo.Err)
+				if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+					objectMultipartInfo.Err = InvalidAccessKeyID{msg: errResp.Message}
+				}
 				return nil, probe.NewError(objectMultipartInfo.Err)
 			}
 
@@ -910,6 +955,10 @@ func (c *s3Client) Stat(isIncomplete bool) (*clientContent, *probe.Error) {
 
 	for objectStat := range c.listObjectWrapper(bucket, object, nonRecursive, nil) {
 		if objectStat.Err != nil {
+			errResp := minio.ToErrorResponse(objectStat.Err)
+			if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+				objectStat.Err = InvalidAccessKeyID{msg: errResp.Message}
+			}
 			return nil, probe.NewError(objectStat.Err)
 		}
 
@@ -945,6 +994,9 @@ func (c *s3Client) Stat(isIncomplete bool) (*clientContent, *probe.Error) {
 		}
 		if errResponse.Code == "NoSuchKey" || errResponse.Code == "InvalidArgument" {
 			return nil, probe.NewError(ObjectMissing{})
+		}
+		if errResponse.Code == "InvalidAccessKeyId" && c.stsCreds {
+			return nil, probe.NewError(InvalidAccessKeyID{msg: errResponse.Message})
 		}
 		return nil, probe.NewError(e)
 	}
@@ -1069,6 +1121,10 @@ func (c *s3Client) listIncompleteInRoutine(contentCh chan *clientContent) {
 	case b == "" && o == "":
 		buckets, err := c.api.ListBuckets()
 		if err != nil {
+			errResp := minio.ToErrorResponse(err)
+			if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+				err = InvalidAccessKeyID{msg: errResp.Message}
+			}
 			contentCh <- &clientContent{
 				Err: probe.NewError(err),
 			}
@@ -1077,6 +1133,10 @@ func (c *s3Client) listIncompleteInRoutine(contentCh chan *clientContent) {
 		isRecursive := false
 		for _, bucket := range buckets {
 			for object := range c.api.ListIncompleteUploads(bucket.Name, o, isRecursive, nil) {
+				errResp := minio.ToErrorResponse(object.Err)
+				if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+					object.Err = InvalidAccessKeyID{msg: errResp.Message}
+				}
 				if object.Err != nil {
 					contentCh <- &clientContent{
 						Err: probe.NewError(object.Err),
@@ -1106,6 +1166,10 @@ func (c *s3Client) listIncompleteInRoutine(contentCh chan *clientContent) {
 		isRecursive := false
 		for object := range c.api.ListIncompleteUploads(b, o, isRecursive, nil) {
 			if object.Err != nil {
+				errResp := minio.ToErrorResponse(object.Err)
+				if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+					object.Err = InvalidAccessKeyID{msg: errResp.Message}
+				}
 				contentCh <- &clientContent{
 					Err: probe.NewError(object.Err),
 				}
@@ -1140,6 +1204,10 @@ func (c *s3Client) listIncompleteRecursiveInRoutine(contentCh chan *clientConten
 	case b == "" && o == "":
 		buckets, err := c.api.ListBuckets()
 		if err != nil {
+			errResp := minio.ToErrorResponse(err)
+			if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+				err = InvalidAccessKeyID{msg: errResp.Message}
+			}
 			contentCh <- &clientContent{
 				Err: probe.NewError(err),
 			}
@@ -1149,6 +1217,10 @@ func (c *s3Client) listIncompleteRecursiveInRoutine(contentCh chan *clientConten
 		for _, bucket := range buckets {
 			for object := range c.api.ListIncompleteUploads(bucket.Name, o, isRecursive, nil) {
 				if object.Err != nil {
+					errResp := minio.ToErrorResponse(object.Err)
+					if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+						object.Err = InvalidAccessKeyID{msg: errResp.Message}
+					}
 					contentCh <- &clientContent{
 						Err: probe.NewError(object.Err),
 					}
@@ -1168,6 +1240,10 @@ func (c *s3Client) listIncompleteRecursiveInRoutine(contentCh chan *clientConten
 		isRecursive := true
 		for object := range c.api.ListIncompleteUploads(b, o, isRecursive, nil) {
 			if object.Err != nil {
+				errResp := minio.ToErrorResponse(object.Err)
+				if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+					object.Err = InvalidAccessKeyID{msg: errResp.Message}
+				}
 				contentCh <- &clientContent{
 					Err: probe.NewError(object.Err),
 				}
@@ -1218,6 +1294,11 @@ func (c *s3Client) listIncompleteRecursiveInRoutineDirOpt(contentCh chan *client
 		isRecursive := false
 		for entry := range c.api.ListIncompleteUploads(bucket, object, isRecursive, nil) {
 			if entry.Err != nil {
+				errResp := minio.ToErrorResponse(entry.Err)
+				if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+					entry.Err = InvalidAccessKeyID{msg: errResp.Message}
+				}
+
 				url := *c.targetURL
 				url.Path = c.joinPath(bucket, object)
 				contentCh <- &clientContent{URL: url, Err: probe.NewError(entry.Err)}
@@ -1323,6 +1404,11 @@ func (c *s3Client) listRecursiveInRoutineDirOpt(contentCh chan *clientContent, d
 		isRecursive := false
 		for entry := range c.listObjectWrapper(bucket, object, isRecursive, nil) {
 			if entry.Err != nil {
+				errResp := minio.ToErrorResponse(entry.Err)
+				if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+					entry.Err = InvalidAccessKeyID{msg: errResp.Message}
+				}
+
 				url := *c.targetURL
 				url.Path = c.joinPath(bucket, object)
 				contentCh <- &clientContent{URL: url, Err: probe.NewError(entry.Err)}
@@ -1364,7 +1450,6 @@ func (c *s3Client) listRecursiveInRoutineDirOpt(contentCh chan *clientContent, d
 	if object == "" {
 		content := c.bucketStat()
 		cContent = &content
-
 		if content.Err != nil {
 			contentCh <- cContent
 			return
@@ -1399,6 +1484,10 @@ func (c *s3Client) listInRoutine(contentCh chan *clientContent) {
 	case b == "" && o == "":
 		buckets, e := c.api.ListBuckets()
 		if e != nil {
+			errResp := minio.ToErrorResponse(e)
+			if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+				e = InvalidAccessKeyID{msg: errResp.Message}
+			}
 			contentCh <- &clientContent{
 				Err: probe.NewError(e),
 			}
@@ -1417,6 +1506,10 @@ func (c *s3Client) listInRoutine(contentCh chan *clientContent) {
 	case b != "" && !strings.HasSuffix(c.targetURL.Path, string(c.targetURL.Separator)) && o == "":
 		buckets, e := c.api.ListBuckets()
 		if e != nil {
+			errResp := minio.ToErrorResponse(e)
+			if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+				e = InvalidAccessKeyID{msg: errResp.Message}
+			}
 			contentCh <- &clientContent{
 				Err: probe.NewError(e),
 			}
@@ -1436,6 +1529,10 @@ func (c *s3Client) listInRoutine(contentCh chan *clientContent) {
 		isRecursive := false
 		for object := range c.listObjectWrapper(b, o, isRecursive, nil) {
 			if object.Err != nil {
+				errResp := minio.ToErrorResponse(object.Err)
+				if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+					object.Err = InvalidAccessKeyID{msg: errResp.Message}
+				}
 				contentCh <- &clientContent{
 					Err: probe.NewError(object.Err),
 				}
@@ -1505,6 +1602,10 @@ func (c *s3Client) listRecursiveInRoutine(contentCh chan *clientContent) {
 					continue
 				}
 				if object.Err != nil {
+					errResp := minio.ToErrorResponse(object.Err)
+					if errResp.Code == "InvalidAccessKeyId" && c.stsCreds {
+						object.Err = InvalidAccessKeyID{msg: errResp.Message}
+					}
 					contentCh <- &clientContent{
 						Err: probe.NewError(object.Err),
 					}
